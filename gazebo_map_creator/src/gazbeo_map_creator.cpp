@@ -14,6 +14,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <filesystem> 
 #include <cmath>
 #include "gazebo/gazebo.hh"
 #include "gazebo/common/common.hh"
@@ -41,6 +42,9 @@ class GazeboMapCreator : public gazebo::SystemPlugin
   rclcpp::Service<gazebo_map_creator_interface::srv::MapRequest>::SharedPtr  map_service_;
   physics::WorldPtr world_;
 
+  // create entityIdLookup 
+  std::unordered_map<std::string, int> classIdLookup_;
+
   /// To be notified once the world is created.
   gazebo::event::ConnectionPtr world_created_event_;
 
@@ -63,6 +67,16 @@ class GazeboMapCreator : public gazebo::SystemPlugin
       world_created_event_.reset();
       world_ = gazebo::physics::get_world(_world_name);
 
+      auto models = world_->Models();
+      int labelCounter = 1;
+      for (const auto& model : models) {
+        std::string name = model->GetName();
+        std::cout << "Model: " << name << std::endl;
+
+        // For example, add all model names to the lookup with unique IDs
+        classIdLookup_[name] = labelCounter++;
+      }
+            
       // Create service for map creation request
       map_service_ = ros_node_->create_service<gazebo_map_creator_interface::srv::MapRequest>(
       "/world/save_map",
@@ -118,6 +132,37 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
 {
   RCLCPP_INFO(ros_node_->get_logger(), "Received message");
 
+  // Build label map filename first
+  std::filesystem::path filePath(_req->filename);
+  std::filesystem::path parentDir = filePath.parent_path();
+  std::filesystem::path labelMapPath = parentDir / "label_map.txt";
+
+  // Check if it exists
+  if (std::filesystem::exists(labelMapPath)) {
+      std::cout << "Label map already exists: " << labelMapPath << std::endl;
+  } else {
+      // If not, build and write the label map
+
+      // Collect and sort
+      std::vector<std::pair<int, std::string>> entries;
+      for (const auto& kv : classIdLookup_) {
+          entries.emplace_back(kv.second, kv.first);
+      }
+      std::sort(entries.begin(), entries.end());
+
+      // Write to file
+      std::ofstream label_map_file(labelMapPath);
+      if (label_map_file.is_open()) {
+          for (const auto& e : entries) {
+              label_map_file << e.first << " " << e.second << "\n";
+          }
+          label_map_file.close();
+          std::cout << "Saved label map to " << labelMapPath << std::endl;
+      } else {
+          std::cerr << "Failed to open label map file: " << labelMapPath << std::endl;
+      }
+  }
+
   // Pause simulation so robot doesn't fall
   world_->SetPaused(true);
 
@@ -140,6 +185,7 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
   float size_x = _req->upperleft.x - _req->lowerright.x;
   float size_y = _req->lowerright.y - _req->upperleft.y;  // y negative
   float size_z = _req->upperleft.z - _req->lowerright.z;
+
 
   if (size_x <=0 || size_y >=0 || size_z <=0)
   {
@@ -192,6 +238,9 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
       {0,0,-1}
   };
 
+  // Store per-point label
+  std::vector<int> labels;
+
   for (int x =0; x < num_points_x; ++x)
   {
     std::cout << "\rPercent complete: " << x * 100.0 / num_points_x << "%    " << std::flush;
@@ -223,7 +272,15 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
           ray->GetIntersection(dist, entityName);
           if (!entityName.empty())
           {
+            std::string model_name = entityName.substr(0, entityName.find("::"));
+            auto it = classIdLookup_.find(model_name);
+            uint32_t label = 0; // Default label for unknown
+            if (it != classIdLookup_.end()) {
+                label = it->second;
+            }
+
             cloud.push_back(pcl::PointXYZ(cur.X(), cur.Y(), cur.Z()));
+            labels.push_back(label);
             break;
           }
         }
@@ -237,6 +294,12 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
   {
       pcl::io::savePCDFileASCII(_req->filename+".pcd", cloud);
       RCLCPP_INFO(ros_node_->get_logger(), "Saved pointcloud to: %s.pcd", _req->filename.c_str());
+
+      std::ofstream labelFile(_req->filename + ".labels");
+      for (const auto& l : labels) {
+          labelFile << l << "\n";
+      }
+      labelFile.close();
   }
 
   RestoreRobotCollisions("velodyne_sensor");
