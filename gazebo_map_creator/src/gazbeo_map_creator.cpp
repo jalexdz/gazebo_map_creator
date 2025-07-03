@@ -270,7 +270,7 @@ public: void OnMapCreate(const std::shared_ptr<gazebo_map_creator_interface::srv
 
           ray->SetPoints(cur, end_point);
           ray->GetIntersection(dist, entityName);
-          if (!entityName.empty())
+          if (!entityName.empty() && entityName.substr(0, entityName.find("::")) != "ground_plane")
           {
             std::string model_name = entityName.substr(0, entityName.find("::"));
             auto it = classIdLookup_.find(model_name);
